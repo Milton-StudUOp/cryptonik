@@ -1,13 +1,24 @@
 """Tests for conservative ciphertext and format identification."""
 
 import base64
+import datetime
 import json
 
 import pytest
+from cryptography import x509 as x509_mod
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import (
+    BestAvailableEncryption,
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+    pkcs12,
+)
 
 from cryptosuite.core.analyzer import (
     MAX_ANALYSIS_BYTES,
-    SegmentDetails,
     analyze_bytes,
     analyze_text,
 )
@@ -155,6 +166,19 @@ def test_dot_separated_segments_are_independently_classified():
     assert all(seg.representation == "Base64" for seg in result.structure.segments)
 
 
+def test_dot_separated_segments_expose_decoded_values():
+    result = analyze_text(
+        "Zmx1Z2U0Y2g3ag==.b2xhIG1ldQ==.YXV0aHRhZzEyMw=="
+    )
+    assert result.structure is not None
+    assert tuple(segment.value for segment in result.structure.segments) == (
+        "fluge4ch7j",
+        "ola meu",
+        "authtag123",
+    )
+    assert result.structure.recognized_standard == "None confirmed"
+
+
 def test_dot_separated_hex_is_not_claimed_as_a_known_standard():
     result = analyze_text("deadbeef.01234567.cafebabe")
     assert result.structure is not None
@@ -205,12 +229,10 @@ def test_small_sample_entropy_shows_sample_limited_maximum():
     encoded = base64.b64encode(raw).decode()
     result = analyze_text(encoded)
     assert result.decoded_bytes is not None
-    if result.decoded_bytes < 256:
-        # Should have sample-limited max
-        if result.decoded_bytes >= 16:
-            assert result.sample_limited_max_entropy is not None
-            assert result.sample_limited_max_entropy <= 8.0
-            assert "Sample too small" in result.statistical_note
+    if 16 <= result.decoded_bytes < 256:
+        assert result.sample_limited_max_entropy is not None
+        assert result.sample_limited_max_entropy <= 8.0
+        assert "Sample too small" in result.statistical_note
 
 
 def test_large_sample_entropy_has_full_assessment():
@@ -294,11 +316,6 @@ def test_is_crypto_container_returns_true_for_openssl():
 
 def test_der_x509_detection():
     """A real DER-encoded X.509 self-signed certificate should be identified."""
-    from cryptography import x509 as x509_mod
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import ec
-    import datetime
-
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509_mod.Name([
         x509_mod.NameAttribute(x509_mod.oid.NameOID.COMMON_NAME, "test"),
@@ -309,11 +326,10 @@ def test_der_x509_detection():
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509_mod.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
         .sign(key, hashes.SHA256())
     )
-    from cryptography.hazmat.primitives.serialization import Encoding
     der = cert.public_bytes(Encoding.DER)
     result = analyze_bytes(der)
     assert any("X.509 certificate (DER)" in c.kind for c in result.candidates)
@@ -322,11 +338,95 @@ def test_der_x509_detection():
     assert any("Public key algorithm" in m for m in result.cryptographic_metadata)
 
 
+def test_der_pkcs8_private_key_and_subject_public_key_are_distinguished():
+    key = ec.generate_private_key(ec.SECP256R1())
+    private_der = key.private_bytes(
+        Encoding.DER, PrivateFormat.PKCS8, NoEncryption()
+    )
+    public_der = key.public_key().public_bytes(
+        Encoding.DER, PublicFormat.SubjectPublicKeyInfo
+    )
+    private_result = analyze_bytes(private_der)
+    public_result = analyze_bytes(public_der)
+    assert private_result.container is not None
+    assert private_result.container.format == "DER-encoded PKCS#8 private key"
+    assert public_result.container is not None
+    assert public_result.container.format == "DER-encoded SubjectPublicKeyInfo"
+
+
+def test_encrypted_der_pkcs8_is_identified_without_a_password():
+    key = ec.generate_private_key(ec.SECP256R1())
+    encrypted = key.private_bytes(
+        Encoding.DER,
+        PrivateFormat.PKCS8,
+        BestAvailableEncryption(b"test-password"),
+    )
+    result = analyze_bytes(encrypted)
+    assert result.container is not None
+    assert result.container.format == "DER-encoded encrypted PKCS#8 private key"
+    assert any("password" in item.casefold() for item in result.cryptographic_metadata)
+
+
+def test_unencrypted_pkcs12_is_parsed_as_a_real_container():
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509_mod.Name(
+        [x509_mod.NameAttribute(x509_mod.oid.NameOID.COMMON_NAME, "pkcs12.test")]
+    )
+    cert = (
+        x509_mod.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509_mod.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(
+            datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
+        )
+        .sign(key, hashes.SHA256())
+    )
+    pfx = pkcs12.serialize_key_and_certificates(
+        b"cryptonik", key, cert, None, NoEncryption()
+    )
+    result = analyze_bytes(pfx)
+    assert result.container is not None
+    assert result.container.format == "PKCS#12 certificate/key container"
+    assert any("certificate" in item for item in result.cryptographic_metadata)
+
+
+def test_encrypted_pkcs12_is_structurally_identified_without_a_password():
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509_mod.Name(
+        [x509_mod.NameAttribute(x509_mod.oid.NameOID.COMMON_NAME, "protected.test")]
+    )
+    cert = (
+        x509_mod.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(key.public_key())
+        .serial_number(x509_mod.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.UTC))
+        .not_valid_after(
+            datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
+        )
+        .sign(key, hashes.SHA256())
+    )
+    pfx = pkcs12.serialize_key_and_certificates(
+        b"cryptonik",
+        key,
+        cert,
+        None,
+        BestAvailableEncryption(b"test-password"),
+    )
+    result = analyze_bytes(pfx)
+    assert result.container is not None
+    assert result.container.format == "PKCS#12 certificate/key container"
+    assert any("password" in item.casefold() for item in result.cryptographic_metadata)
+
+
 def test_jwe_five_segments_identified():
     """A JWE compact serialization with 5 dot-separated segments is classified."""
     header = base64.urlsafe_b64encode(
         b'{"alg":"RSA-OAEP","enc":"A256GCM"}'
     ).decode().rstrip("=")
     parts = [header, "encrypted_key", "init_vector", "ciphertext0", "auth_tag0"]
-    result = analyze_text(".".join(parts))
     assert "JSON Web Encryption (JWE)" in _kinds(".".join(parts))

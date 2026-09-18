@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from math import log2
 
 from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 
@@ -73,7 +74,9 @@ _CRYPTO_CONTAINER_FORMATS = frozenset({
     "OpenSSH public-key record",
     "DER-encoded X.509 certificate",
     "DER-encoded PKCS#8 private key",
-    "DER-encoded PKCS#8 public key",
+    "DER-encoded encrypted PKCS#8 private key",
+    "DER-encoded SubjectPublicKeyInfo",
+    "PKCS#12 certificate/key container",
     "DER-encoded ASN.1 structure",
 })
 MAX_ANALYSIS_BYTES = 16 * 1024 * 1024
@@ -439,9 +442,11 @@ def _identify_jwt(
     # match the Base64URL alphabet even when they are too short for the
     # strict round-trip check used by _segment_details.
     for index, seg in enumerate(segments):
-        if seg.representation == "Unknown":
-            if not _BASE64URL.fullmatch(parts[index]):
-                return None
+        if (
+            seg.representation == "Unknown"
+            and not _BASE64URL.fullmatch(parts[index])
+        ):
+            return None
     if len(parts) == 5:
         if not isinstance(header.get("enc"), str):
             return None
@@ -751,6 +756,13 @@ def _identify_cryptographic_format(
                 'OpenSSL\'s "Salted__" header identifies the container '
                 "format, not the encryption algorithm."
             )
+        elif container.format in {
+            "Cryptonik CRYPTX container",
+            "Cryptonik CRYPTH container",
+        }:
+            metadata.extend(_cryptonik_container_metadata(data))
+        elif container.format == "Cryptonik detached signature":
+            metadata.extend(_cryptonik_signature_metadata(data))
         return None, tuple(metadata)
 
     # Skip if _identify_payload already matched a non-crypto container.
@@ -766,15 +778,100 @@ def _identify_cryptographic_format(
     return None, ()
 
 
+def _cryptonik_container_metadata(data: bytes) -> tuple[str, ...]:
+    """Read non-secret authenticated header metadata from CRYPTX/CRYPTH."""
+    if len(data) < 11:
+        return ("Header is truncated",)
+    version = data[6]
+    header_length = int.from_bytes(data[7:11], "big")
+    if header_length <= 0 or 11 + header_length > len(data):
+        return (f"Version: {version}", "Header is truncated or malformed")
+    try:
+        header = json.loads(data[11 : 11 + header_length].decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError):
+        return (f"Version: {version}", "Header JSON is malformed")
+    metadata = [f"Version: {version}"]
+    if isinstance(header, dict):
+        for key, label in (
+            ("algorithm", "Content cipher"),
+            ("chunk_size", "Chunk size"),
+            ("plaintext_size", "Declared plaintext size"),
+        ):
+            if key in header:
+                metadata.append(f"{label}: {header[key]}")
+        recipients = header.get("recipients")
+        if isinstance(recipients, list):
+            metadata.append(f"Recipients: {len(recipients)}")
+    return tuple(metadata)
+
+
+def _cryptonik_signature_metadata(data: bytes) -> tuple[str, ...]:
+    try:
+        payload = json.loads(data[9:].decode("ascii"))
+    except (UnicodeError, json.JSONDecodeError):
+        return ("Signature metadata is truncated or malformed",)
+    if not isinstance(payload, dict):
+        return ("Signature metadata is malformed",)
+    metadata = []
+    if "algorithm" in payload:
+        metadata.append(f"Signature algorithm: {payload['algorithm']}")
+    if "digest_algorithm" in payload:
+        metadata.append(f"Digest algorithm: {payload['digest_algorithm']}")
+    return tuple(metadata)
+
+
 def _try_der_parse(
     data: bytes, candidates: list[Identification]
 ) -> tuple[ContainerDetails | None, list[str]]:
     """Attempt to parse binary data as DER-encoded cryptographic objects."""
     metadata: list[str] = []
 
+    # Try an unencrypted PKCS#12/PFX container. Encrypted PKCS#12 data cannot
+    # be positively identified by this parser without the password.
+    try:
+        bundle = pkcs12.load_pkcs12(data, password=None)
+    except (TypeError, ValueError, UnsupportedAlgorithm):
+        bundle = None
+    if bundle is not None and (bundle.key is not None or bundle.cert is not None):
+        contents = []
+        if bundle.key is not None:
+            contents.append("private key")
+        if bundle.cert is not None:
+            contents.append("certificate")
+        if bundle.additional_certs:
+            contents.append(f"{len(bundle.additional_certs)} additional certificate(s)")
+        candidates.append(
+            Identification(
+                "PKCS#12 certificate/key container",
+                "certain",
+                "Successfully parsed an unencrypted PKCS#12/PFX structure",
+            )
+        )
+        metadata.append("Contents: " + ", ".join(contents))
+        return (
+            ContainerDetails("PKCS#12 certificate/key container", "ASN.1 PFX"),
+            metadata,
+        )
+    if _looks_like_pkcs12(data):
+        candidates.append(
+            Identification(
+                "PKCS#12 certificate/key container",
+                "high",
+                "ASN.1 PFX version and ContentInfo structure detected; password may be required",
+            )
+        )
+        metadata.append("Contents are encrypted or require a password to inspect")
+        return (
+            ContainerDetails("PKCS#12 certificate/key container", "ASN.1 PFX"),
+            metadata,
+        )
+
     # Try X.509 certificate.
     try:
         cert = x509.load_der_x509_certificate(data)
+    except (TypeError, ValueError, UnsupportedAlgorithm):
+        cert = None
+    if cert is not None:
         pub = cert.public_key()
         key_size = getattr(pub, "key_size", None)
         algo = type(pub).__name__.replace("_", " ")
@@ -795,17 +892,18 @@ def _try_der_parse(
             ContainerDetails("DER-encoded X.509 certificate", "ASN.1 SEQUENCE"),
             metadata,
         )
-    except Exception:  # noqa: BLE001
-        pass
 
-    # Try PKCS#8 public key.
+    # Try a DER SubjectPublicKeyInfo public key. Public keys are not PKCS#8.
     try:
         pub = serialization.load_der_public_key(data)
+    except (TypeError, ValueError, UnsupportedAlgorithm):
+        pub = None
+    if pub is not None:
         algo = type(pub).__name__.replace("_", " ")
         key_size = getattr(pub, "key_size", None)
         candidates.append(
             Identification(
-                "PKCS#8 public key (DER)",
+                "SubjectPublicKeyInfo public key (DER)",
                 "certain",
                 f"Valid DER-encoded SubjectPublicKeyInfo; algorithm: {algo}",
             )
@@ -814,15 +912,20 @@ def _try_der_parse(
         if key_size is not None:
             metadata.append(f"Key size: {key_size} bits")
         return (
-            ContainerDetails("DER-encoded PKCS#8 public key", "ASN.1 SEQUENCE"),
+            ContainerDetails("DER-encoded SubjectPublicKeyInfo", "ASN.1 SEQUENCE"),
             metadata,
         )
-    except Exception:  # noqa: BLE001
-        pass
 
     # Try PKCS#8 private key (unencrypted).
+    password_required = False
     try:
         priv = serialization.load_der_private_key(data, password=None)
+    except TypeError as exc:
+        priv = None
+        password_required = "password" in str(exc).casefold()
+    except (ValueError, UnsupportedAlgorithm):
+        priv = None
+    if priv is not None:
         algo = type(priv).__name__.replace("_", " ")
         key_size = getattr(priv, "key_size", None)
         candidates.append(
@@ -839,8 +942,19 @@ def _try_der_parse(
             ContainerDetails("DER-encoded PKCS#8 private key", "ASN.1 SEQUENCE"),
             metadata,
         )
-    except Exception:  # noqa: BLE001
-        pass
+    if password_required:
+        candidates.append(
+            Identification(
+                "Encrypted PKCS#8 private key (DER)",
+                "high",
+                "Private-key parser confirms that a password is required",
+            )
+        )
+        metadata.append("Private key is encrypted; algorithm details require its password")
+        return (
+            ContainerDetails("DER-encoded encrypted PKCS#8 private key", "ASN.1 SEQUENCE"),
+            metadata,
+        )
 
     # Fallback: looks like ASN.1 but we can't parse specifics.
     if len(data) >= 4:
@@ -856,6 +970,48 @@ def _try_der_parse(
             metadata,
         )
     return None, metadata
+
+
+def _looks_like_pkcs12(data: bytes) -> bool:
+    """Recognize the outer PFX ASN.1 structure without decrypting its contents."""
+    outer = _der_element(data, 0)
+    if outer is None or outer[0] != 0x30 or outer[2] != len(data):
+        return False
+    version = _der_element(data, outer[1])
+    if version is None or version[0] != 0x02:
+        return False
+    version_value = data[version[1] : version[2]]
+    if version_value != b"\x03":
+        return False
+    auth_safe = _der_element(data, version[2])
+    if auth_safe is None or auth_safe[0] != 0x30:
+        return False
+    content_type = _der_element(data, auth_safe[1])
+    if content_type is None or content_type[0] != 0x06:
+        return False
+    # 1.2.840.113549.1.7.1 (PKCS#7 data), used by PFX AuthenticatedSafe.
+    return data[content_type[1] : content_type[2]] == b"*\x86H\x86\xf7\r\x01\x07\x01"
+
+
+def _der_element(data: bytes, offset: int) -> tuple[int, int, int] | None:
+    """Return (tag, content offset, end offset) for one bounded DER element."""
+    if offset < 0 or offset + 2 > len(data):
+        return None
+    tag = data[offset]
+    first_length = data[offset + 1]
+    cursor = offset + 2
+    if first_length & 0x80:
+        width = first_length & 0x7F
+        if width == 0 or width > 4 or cursor + width > len(data):
+            return None
+        length = int.from_bytes(data[cursor : cursor + width], "big")
+        cursor += width
+    else:
+        length = first_length
+    end = cursor + length
+    if end > len(data):
+        return None
+    return tag, cursor, end
 
 
 def _is_crypto_container(container: ContainerDetails | None) -> bool:

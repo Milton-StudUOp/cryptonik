@@ -17,6 +17,11 @@
 - Vaults support inactivity auto-lock and explicit password rotation.
 - X.509 validation requires explicit roots and checks time, chain signatures,
   CA constraints, and optional SAN/hostname matching.
+- Analyzer input is bounded to 16 MiB, recursive decoding is depth-limited, and
+  DER parsing catches expected parser failures without suppressing unexpected
+  programming errors.
+- Format identification distinguishes representation, container, and cipher;
+  entropy is suppressed below 16 bytes and never treated as algorithm proof.
 - Ruff, Bandit, dependency consistency, malformed input, and large multichunk
   tests are part of the validation procedure.
 
@@ -29,6 +34,12 @@ must be correctly configured. No application can protect data after an attacker
 controls the running process. Dependency provenance still depends on the Python
 package supply chain. Linux runtime behavior is coded portably and configured
 in CI; the current local verification was performed on Windows.
+
+The analyzer is an identification aid, not a malware sandbox or proof of
+cryptographic provenance. Parsing reports structural compatibility only.
+Encrypted PKCS#8 and PKCS#12 contents cannot be inspected without their
+passwords, and attacker-controlled display text should still be handled as
+untrusted terminal output.
 
 The secure-delete command is explicitly best effort. Overwriting cannot be
 guaranteed on SSDs, copy-on-write filesystems, snapshots, journaling filesystems,

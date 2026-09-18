@@ -1367,7 +1367,7 @@ def _print_analysis(result: AnalysisResult) -> None:
 
     # ── Structure (dot-separated / JWT / JWE) ──
     if result.structure is not None:
-        print(f"\nStructure:")
+        print("\nStructure:")
         print(f"  {result.structure.kind} [{len(result.structure.segments)} segments]")
         for index, segment in enumerate(result.structure.segments, 1):
             print(f"\n  Segment {index}:")
@@ -1421,13 +1421,13 @@ def _print_analysis(result: AnalysisResult) -> None:
     elif result.sample_limited_max_entropy is not None and result.sample_limited_max_entropy < 8.0:
         # Improvement 2: Three-tier display for small samples.
         print("\nStatistical characteristics:")
-        print(f"\n  Observed Shannon entropy:")
+        print("\n  Observed Shannon entropy:")
         print(f"    {result.entropy_bits_per_byte:.4f} bits/byte")
-        print(f"\n  Sample-limited maximum:")
+        print("\n  Sample-limited maximum:")
         print(f"    {result.sample_limited_max_entropy:.4f} bits/byte")
-        print(f"\n  Theoretical byte maximum:")
-        print(f"    8.0000 bits/byte")
-        print(f"\n  Assessment:")
+        print("\n  Theoretical byte maximum:")
+        print("    8.0000 bits/byte")
+        print("\n  Assessment:")
         print(f"    {result.statistical_note}")
     else:
         # Full-size sample: standard display.

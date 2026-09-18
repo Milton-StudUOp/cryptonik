@@ -1,6 +1,6 @@
 # Cryptonik
 
-Cryptonik 1.0 is a local cryptography and security toolkit for Windows and
+Cryptonik 1.1 is a local cryptography and security toolkit for Windows and
 Linux. This repository contains the complete CLI/backend. A GUI and native
 executable packaging are intentionally excluded.
 
@@ -17,7 +17,8 @@ executable packaging are intentionally excluded.
 - X.509 inspection, CSR/self-signed generation, and offline trust validation
 - Secure random/password generators and measured local benchmarks
 - Isolated educational classical cryptography and cryptanalysis lab
-- Conservative ciphertext/encoding/container analyzer with explicit confidence
+- Forensic encoding/container analyzer with recursive decoding, cryptographic
+  format intelligence, and explicit confidence
 - Functional interactive menu and direct command-line interface
 
 Production primitives are supplied by `cryptography`, libsodium/PyNaCl,
@@ -74,13 +75,14 @@ python main.py analyze "PASTE_VALUE_HERE"
 python main.py analyze --file encrypted.bin
 ```
 
-The analyzer recognizes Cryptonik containers and text tokens, OpenSSL `Salted__`,
-PEM, OpenSSH Ed25519 keys, JWT, ZIP, PDF, PNG, strict hex/Base64/Base32 encodings,
-binary byte groups, spaced hexadecimal bytes, Morse, URL encoding, dot-separated
-structures, and hash-sized values. It recursively inspects up to four unambiguous
-decode layers. Strong format signatures are evaluated before statistical heuristics.
-Small samples are explicitly rejected for entropy-based classification. Cipher
-algorithms cannot generally be identified from ciphertext alone.
+The analyzer separates representation, container, structure, cryptographic
+metadata, and statistical properties. It recognizes Cryptonik formats, OpenSSL
+`Salted__`, PEM/OpenPGP armor, OpenSSH keys, X.509 DER, PKCS#8, PKCS#12/PFX,
+validated JWT/JWS/JWE structures, ZIP, PDF, PNG, strict encodings, Morse, and
+hash-sized values. Dot-separated segments and up to four unambiguous decode
+layers are inspected recursively. Strong signatures precede heuristics, and
+samples below 16 bytes do not display entropy. See `docs/ANALYZER.md` for the
+confidence model, supported formats, limitations, and examples.
 
 ## Public-key files and signatures
 
@@ -170,6 +172,7 @@ passwords, plaintext, or vault values.
 Read:
 
 - `docs/CRYPTO_CORE.md`
+- `docs/ANALYZER.md`
 - `docs/CRYPTX_FORMAT.md`
 - `docs/HYBRID_FORMAT.md`
 - `docs/SIGNATURE_FORMAT.md`

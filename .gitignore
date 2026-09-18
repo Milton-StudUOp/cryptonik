@@ -9,3 +9,5 @@ build/
 dist/
 *.log
 .ruff_cache/
+context.md
+.context.md

@@ -17,5 +17,8 @@ This model covers the completed CLI/backend. GUI and packaging are out of scope.
 | Symlink attacks | Unexpected overwrite | Reject source/destination symlinks; no implicit overwrite | Parent-directory replacement remains OS-dependent |
 | Partial-write corruption | Lost or invalid output | fsync, same-directory temporary file and atomic publication | Power loss and filesystem behavior vary |
 | Malicious certificate | False trust decision | Explicit roots, signatures, validity, CA constraints and SAN matching | No online CRL/OCSP checking |
+| Malicious analyzer input | Resource exhaustion or parser abuse | 16 MiB input bound, four-layer decode limit, bounded segment display, established DER parsers | Native dependency parser defects remain possible |
+| Misidentified ciphertext | False security conclusion | Confidence labels; representation/container/cipher separation; signatures before heuristics | Unknown and proprietary formats remain ambiguous |
+| Misleading entropy result | Incorrect randomness conclusion | No display below 16 bytes; sample-limited maximum below 256 bytes | Entropy alone never proves encryption or quality |
 | Vault left open | Secret exposure | Optional inactivity auto-lock and explicit lock | Process compromise before lock |
 | Dependency compromise | Arbitrary code execution | Bounded dependencies, pip check, Ruff and Bandit | Registry or build-chain compromise |
